@@ -1060,11 +1060,11 @@ async def send_boss_daily_tasklist(context: ContextTypes.DEFAULT_TYPE):
                             f"({user['full_name']}): {e}")
 
 
-# ---------------- SOATLIK ESLATMALAR (vaqti o'tib, bajarilmagan) ----------------
+# ---------------- TEZKOR ESLATMALAR (vaqti o'tib, bajarilmagan) ----------------
 
 async def check_boss_task_reminders(context: ContextTypes.DEFAULT_TYPE):
-    """Har soat ishga tushadi (09:00-23:00 oralig'ida). Vaqti o'tib ketgan,
-    lekin hali bajarilmagan vazifalar uchun qattiqroq eslatma yuboradi."""
+    """Har 2 daqiqada ishga tushadi (09:00-23:00 oralig'ida). Vazifa vaqti
+    o'tgan ZAHOTI birinchi eslatma yuboradi, keyin har soatda takrorlaydi."""
     now = datetime.now()
     if now.hour < 9 or now.hour >= 23:
         return
@@ -1095,9 +1095,17 @@ async def check_boss_task_reminders(context: ContextTypes.DEFAULT_TYPE):
                 continue  # allaqachon bajarilgan
 
             last_reminder = db.get_last_reminder(t["id"], today_str)
-            current_hour_str = now.strftime("%H:00")
-            if last_reminder == current_hour_str:
-                continue  # shu soatda allaqachon eslatilgan
+            now_minutes_total = now.hour * 60 + now.minute
+
+            if last_reminder:
+                last_h, last_m = map(int, last_reminder.split(":"))
+                last_minutes_total = last_h * 60 + last_m
+                # Oxirgi eslatmadan kamida 60 daqiqa o'tmagan bo'lsa, kutamiz
+                if now_minutes_total - last_minutes_total < 60:
+                    continue
+
+            current_time_str = now.strftime("%H:%M")
+            db.update_last_reminder(t["id"], today_str, current_time_str)
 
             db.update_last_reminder(t["id"], today_str, current_hour_str)
 
@@ -1302,10 +1310,11 @@ def main():
             send_boss_daily_tasklist,
             time=datetime.strptime("08:00", "%H:%M").time(),
         )
-        # Har soat (09:00-23:00), vaqti o'tib bajarilmagan vazifalar uchun eslatma
+        # Har 2 daqiqada tekshiradi (09:00dan boshlab), vazifa vaqti o'tgan
+        # zahoti birinchi eslatma yuboradi, keyin har soatda takrorlaydi
         app.job_queue.run_repeating(
             check_boss_task_reminders,
-            interval=3600,  # 1 soat
+            interval=120,  # 2 daqiqa
             first=datetime.strptime("09:00", "%H:%M").time(),
         )
         # 23:00da, kunlik shaxsiy hisobot
