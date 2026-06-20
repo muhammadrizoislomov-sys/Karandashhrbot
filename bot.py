@@ -1107,8 +1107,6 @@ async def check_boss_task_reminders(context: ContextTypes.DEFAULT_TYPE):
             current_time_str = now.strftime("%H:%M")
             db.update_last_reminder(t["id"], today_str, current_time_str)
 
-            db.update_last_reminder(t["id"], today_str, current_hour_str)
-
             if t["task_type"] == "prayer":
                 hadith_text, hadith_source = random.choice(db.PRAYER_HADITHS)
                 text = (
