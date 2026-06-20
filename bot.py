@@ -315,7 +315,6 @@ async def per_message_comment_received(update: Update, context: ContextTypes.DEF
     context.bot_data.setdefault("support_map", {})[forwarded.message_id] = (
         update.effective_user.id
     )
-    await update.message.reply_text("Xabaringiz adminga yuborildi. Javobni shu yerda kutib turing.")
 
 
 async def admin_reply_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -332,11 +331,10 @@ async def admin_reply_received(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         await context.bot.send_message(
             chat_id=target_telegram_id,
-            text=f"💬 Admin javobi:\n\n{update.message.text}",
+            text=update.message.text,
         )
-        await update.message.reply_text("Javob xodimga yuborildi. ✅")
     except Exception as e:
-        await update.message.reply_text(f"Xabar yuborilmadi: {e}")
+        logger.warning(f"Admin javobi yuborilmadi: {e}")
 
 
 async def checklist_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
