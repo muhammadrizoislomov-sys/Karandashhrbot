@@ -84,6 +84,47 @@ def init_db():
         )
         """)
 
+        # ---------- BOSHLIQ SHAXSIY VAZIFALARI ----------
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS boss_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            task_type TEXT NOT NULL,     -- 'daily' | 'weekly' | 'monthly' | 'once' | 'prayer'
+            time_str TEXT,               -- 'HH:MM', vazifa bajarilishi kerak bo'lgan vaqt
+            weekly_days TEXT,            -- 'mon,wed,fri' (faqat weekly uchun)
+            monthly_day INTEGER,         -- 1-31 (faqat monthly uchun)
+            prayer_name TEXT,            -- 'bomdod'|'peshin'|'asr'|'shom'|'xufton' (faqat prayer)
+            active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+        """)
+
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS boss_task_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            log_date TEXT NOT NULL,      -- 'YYYY-MM-DD'
+            done INTEGER DEFAULT 0,
+            done_at TEXT,
+            last_reminder_at TEXT,       -- oxirgi "qattiq" eslatma vaqti (HH:MM)
+            UNIQUE(task_id, log_date),
+            FOREIGN KEY (task_id) REFERENCES boss_tasks(id)
+        )
+        """)
+
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS prayer_times (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            bomdod TEXT, peshin TEXT, asr TEXT, shom TEXT, xufton TEXT,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+        """)
+
 
 # ---------- USERS ----------
 
@@ -481,3 +522,212 @@ def force_finalize_section_with_marks(user_id: int, summary_date: str, section: 
         user_id, summary_date, section,
         time_str=time_str, done_count=done_count, total_count=len(items),
     )
+
+
+# =====================================================================
+# BOSHLIQ SHAXSIY VAZIFALARI (boss_tasks)
+# =====================================================================
+
+PRAYER_ORDER = ["bomdod", "peshin", "asr", "shom", "xufton"]
+PRAYER_LABELS = {
+    "bomdod": "Bomdod", "peshin": "Peshin", "asr": "Asr",
+    "shom": "Shom", "xufton": "Xufton",
+}
+
+PRAYER_HADITHS = [
+    ('Rasululloh \u0631\ufdfa dedilar:\n"Kishi bilan kufr va shirk o\'rtasidagi '
+     'narsa namozni tark qilishdir."', "Sahih Muslim"),
+    ('Rasululloh \u0631\ufdfa dedilar:\n"Biz bilan ular (kofirlar) o\'rtasidagi '
+     'ahd namozdir. Kim uni tark qilsa, kufrga ketibdi."', "Jami' at-Tirmidhi"),
+    ('Qiyomat kuni birinchi hisob qilinadigan amal:\n"Bandaning qiyomat kuni '
+     'birinchi hisob qilinadigan amali namozdir. Agar namozi to\'g\'ri bo\'lsa, '
+     'najot topadi va muvaffaqiyat qozonadi. Agar namozi buzilgan bo\'lsa, '
+     'ziyon ko\'radi."', "Sunan at-Tirmidhi"),
+    ('Do\'zax ahlining so\'zi (Qur\'ondan):\n"Sizlarni Saqar (do\'zax)ga nima '
+     'kiritdi?"\nUlar aytadilar:\n"Biz namoz o\'qiydiganlardan emas edik."',
+     "Qur'on"),
+    ('"Kim asr namozini tark qilsa, uning amallari behuda bo\'ladi."',
+     "Sahih al-Bukhari"),
+]
+
+PRAYER_CLOSING_NOTE = (
+    "Shu bilan birga, inson tirik ekan, tavba eshigi ochiq. Agar kimdir "
+    "namozni tashlab qo'ygan bo'lsa, bugundan boshlasa, Allohning rahmati "
+    "juda keng. Rasululloh \u0631\ufdfa:\n"
+    '"Tavba qilgan kishi gunoh qilmagandek bo\'ladi."\n'
+    "— Sunan Ibn Majah"
+)
+
+
+def add_boss_task(user_id, text, task_type, time_str=None, weekly_days=None,
+                   monthly_day=None, prayer_name=None):
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO boss_tasks
+               (user_id, text, task_type, time_str, weekly_days, monthly_day, prayer_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, text, task_type, time_str, weekly_days, monthly_day, prayer_name),
+        )
+        return cur.lastrowid
+
+
+def get_boss_tasks(user_id, active_only=True):
+    with get_conn() as conn:
+        if active_only:
+            rows = conn.execute(
+                "SELECT * FROM boss_tasks WHERE user_id = ? AND active = 1 ORDER BY time_str",
+                (user_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM boss_tasks WHERE user_id = ? ORDER BY time_str",
+                (user_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def deactivate_boss_task(task_id):
+    with get_conn() as conn:
+        conn.execute("UPDATE boss_tasks SET active = 0 WHERE id = ?", (task_id,))
+
+
+def get_tasks_for_today(user_id, check_date: date):
+    """Berilgan kunda BAJARILISHI kerak bo'lgan barcha vazifalarni qaytaradi
+    (turi qaysi bo'lishidan qat'iy nazar — daily/weekly/monthly/once/prayer)."""
+    weekday_map = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri", 5: "sat", 6: "sun"}
+    weekday = weekday_map[check_date.weekday()]
+    all_tasks = get_boss_tasks(user_id)
+
+    result = []
+    for t in all_tasks:
+        if t["task_type"] == "daily":
+            result.append(t)
+        elif t["task_type"] == "weekly":
+            days = (t["weekly_days"] or "").split(",")
+            if weekday in days:
+                result.append(t)
+        elif t["task_type"] == "monthly":
+            if t["monthly_day"] == check_date.day:
+                result.append(t)
+        elif t["task_type"] == "once":
+            result.append(t)
+        elif t["task_type"] == "prayer":
+            result.append(t)
+    return result
+
+
+def is_boss_task_done(task_id, log_date):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT done FROM boss_task_log WHERE task_id = ? AND log_date = ?",
+            (task_id, log_date),
+        ).fetchone()
+        return bool(row and row["done"])
+
+
+def mark_boss_task_done(task_id, log_date):
+    with get_conn() as conn:
+        existing = conn.execute(
+            "SELECT * FROM boss_task_log WHERE task_id = ? AND log_date = ?",
+            (task_id, log_date),
+        ).fetchone()
+        now_str = datetime.now().strftime("%H:%M")
+        if existing:
+            conn.execute(
+                "UPDATE boss_task_log SET done = 1, done_at = ? "
+                "WHERE task_id = ? AND log_date = ?",
+                (now_str, task_id, log_date),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO boss_task_log (task_id, log_date, done, done_at) "
+                "VALUES (?, ?, 1, ?)",
+                (task_id, log_date, now_str),
+            )
+    # 'once' turidagi vazifa bajarilgach, butunlay o'chiriladi (ro'yxatdan chiqadi)
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT task_type FROM boss_tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if row and row["task_type"] == "once":
+            conn.execute("UPDATE boss_tasks SET active = 0 WHERE id = ?", (task_id,))
+
+
+def update_last_reminder(task_id, log_date, time_str):
+    with get_conn() as conn:
+        existing = conn.execute(
+            "SELECT * FROM boss_task_log WHERE task_id = ? AND log_date = ?",
+            (task_id, log_date),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE boss_task_log SET last_reminder_at = ? "
+                "WHERE task_id = ? AND log_date = ?",
+                (time_str, task_id, log_date),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO boss_task_log (task_id, log_date, done, last_reminder_at) "
+                "VALUES (?, ?, 0, ?)",
+                (task_id, log_date, time_str),
+            )
+
+
+def get_last_reminder(task_id, log_date):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT last_reminder_at FROM boss_task_log WHERE task_id = ? AND log_date = ?",
+            (task_id, log_date),
+        ).fetchone()
+        return row["last_reminder_at"] if row else None
+
+
+def get_boss_daily_report(user_id, log_date):
+    """Berilgan kunda, boshliqning barcha vazifalari va ularning holati."""
+    tasks = get_tasks_for_today(user_id, datetime.strptime(log_date, "%Y-%m-%d").date())
+    result = []
+    for t in tasks:
+        done = is_boss_task_done(t["id"], log_date)
+        result.append({**t, "done": done})
+    return result
+
+
+# ---------- NAMOZ VAQTLARI ----------
+
+def set_prayer_times(user_id, bomdod, peshin, asr, shom, xufton):
+    with get_conn() as conn:
+        existing = conn.execute(
+            "SELECT * FROM prayer_times WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        now_str = datetime.now().isoformat()
+        if existing:
+            conn.execute(
+                """UPDATE prayer_times SET bomdod=?, peshin=?, asr=?, shom=?,
+                   xufton=?, updated_at=? WHERE user_id=?""",
+                (bomdod, peshin, asr, shom, xufton, now_str, user_id),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO prayer_times
+                   (user_id, bomdod, peshin, asr, shom, xufton, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (user_id, bomdod, peshin, asr, shom, xufton, now_str),
+            )
+
+
+def get_prayer_times(user_id):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM prayer_times WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def ensure_prayer_tasks(user_id):
+    """Foydalanuvchida 5 vaqt namoz uchun boss_tasks yozuvi yo'q bo'lsa,
+    yaratadi (vaqtsiz — vaqt prayer_times jadvalidan olinadi)."""
+    existing = get_boss_tasks(user_id)
+    existing_prayers = {t["prayer_name"] for t in existing if t["task_type"] == "prayer"}
+    for p in PRAYER_ORDER:
+        if p not in existing_prayers:
+            add_boss_task(user_id, PRAYER_LABELS[p], "prayer", prayer_name=p)

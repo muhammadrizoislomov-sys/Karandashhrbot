@@ -7,6 +7,7 @@ Talab qilinadigan kutubxona: pip install python-telegram-bot==21.* python-dotenv
 
 import os
 import logging
+import random
 from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
 
@@ -43,6 +44,8 @@ WEEKDAY_MAP = {
 
 # Conversation holatlari
 ASK_NAME, ASK_ROLE = range(2)
+(TASK_TEXT, TASK_TYPE, TASK_WEEKLY_DAYS, TASK_MONTHLY_DAY, TASK_TIME) = range(10, 15)
+(PRAYER_BOMDOD, PRAYER_PESHIN, PRAYER_ASR, PRAYER_SHOM, PRAYER_XUFTON) = range(20, 25)
 
 # Foydalanuvchi sessiyasida joriy cheklist holati
 # user_data ichida saqlanadi: {'items': [...], 'index': 0, 'section': 'ochilish', 'answers': {}}
@@ -728,6 +731,405 @@ async def send_previous_day_warning(context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"Ogohlantirish yuborilmadi ({user['full_name']}): {e}")
 
 
+# =====================================================================
+# BOSHLIQ SHAXSIY VAZIFALARI MODULI
+# =====================================================================
+
+def require_boshqaruvchi(func):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = db.get_user(update.effective_user.id)
+        if not user or user["role"] != "boshqaruvchi" or not user["approved"]:
+            await update.message.reply_text(
+                "Bu buyruq faqat tasdiqlangan Do'kon boshqaruvchisi uchun."
+            )
+            return ConversationHandler.END
+        return await func(update, context, user)
+    return wrapper
+
+
+# ---------------- VAZIFA QO'SHISH OQIMI ----------------
+
+@require_boshqaruvchi
+async def cmd_vazifa_qosh(update: Update, context: ContextTypes.DEFAULT_TYPE, user):
+    context.user_data["new_task"] = {"user_id": user["id"]}
+    await update.message.reply_text("Yangi vazifa matnini yozing:")
+    return TASK_TEXT
+
+
+async def task_text_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["new_task"]["text"] = update.message.text
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔁 Har kuni", callback_data="ttype:daily")],
+        [InlineKeyboardButton("📅 Har hafta", callback_data="ttype:weekly")],
+        [InlineKeyboardButton("🗓️ Har oy", callback_data="ttype:monthly")],
+        [InlineKeyboardButton("1️⃣ Bir martalik", callback_data="ttype:once")],
+    ])
+    await update.message.reply_text("Bu necha martalik vazifa?", reply_markup=kb)
+    return TASK_TYPE
+
+
+async def task_type_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    ttype = query.data.split(":")[1]
+    context.user_data["new_task"]["task_type"] = ttype
+
+    if ttype == "weekly":
+        await query.edit_message_text(
+            "Qaysi kunlari? (masalan: mon,wed,fri — dushanba, chorshanba, juma)\n\n"
+            "Kunlar: mon, tue, wed, thu, fri, sat, sun (vergul bilan ajratib yozing)"
+        )
+        return TASK_WEEKLY_DAYS
+    elif ttype == "monthly":
+        await query.edit_message_text("Oyning nechanchi kuni? (1-31 oralig'ida raqam yozing)")
+        return TASK_MONTHLY_DAY
+    else:
+        await query.edit_message_text("Qaysi vaqtda eslatib turay? (masalan: 09:00)")
+        return TASK_TIME
+
+
+async def task_weekly_days_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    days_raw = update.message.text.strip().lower()
+    valid_days = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+    days = [d.strip() for d in days_raw.split(",")]
+    if not all(d in valid_days for d in days):
+        await update.message.reply_text(
+            "Noto'g'ri format. Masalan: mon,wed,fri — qaytadan yozing:"
+        )
+        return TASK_WEEKLY_DAYS
+    context.user_data["new_task"]["weekly_days"] = ",".join(days)
+    await update.message.reply_text("Qaysi vaqtda eslatib turay? (masalan: 15:00)")
+    return TASK_TIME
+
+
+async def task_monthly_day_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        day = int(update.message.text.strip())
+        if not (1 <= day <= 31):
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Iltimos, 1-31 oralig'ida raqam yozing:")
+        return TASK_MONTHLY_DAY
+    context.user_data["new_task"]["monthly_day"] = day
+    await update.message.reply_text("Qaysi vaqtda eslatib turay? (masalan: 10:00)")
+    return TASK_TIME
+
+
+async def task_time_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    time_raw = update.message.text.strip()
+    try:
+        datetime.strptime(time_raw, "%H:%M")
+    except ValueError:
+        await update.message.reply_text(
+            "Noto'g'ri format. Masalan: 09:00 — qaytadan yozing:"
+        )
+        return TASK_TIME
+
+    data = context.user_data["new_task"]
+    db.add_boss_task(
+        data["user_id"], data["text"], data["task_type"],
+        time_str=time_raw,
+        weekly_days=data.get("weekly_days"),
+        monthly_day=data.get("monthly_day"),
+    )
+    await update.message.reply_text(f"✅ Vazifa qo'shildi: \"{data['text']}\" — {time_raw}")
+    context.user_data.pop("new_task", None)
+    return ConversationHandler.END
+
+
+# ---------------- VAZIFALARNI KO'RISH / O'CHIRISH ----------------
+
+@require_boshqaruvchi
+async def cmd_vazifalarim(update: Update, context: ContextTypes.DEFAULT_TYPE, user):
+    tasks = db.get_boss_tasks(user["id"])
+    if not tasks:
+        await update.message.reply_text("Hozircha vazifalar yo'q. /vazifa_qosh orqali qo'shing.")
+        return
+
+    type_labels = {"daily": "🔁 Har kuni", "weekly": "📅 Har hafta",
+                   "monthly": "🗓️ Har oy", "once": "1️⃣ Bir martalik",
+                   "prayer": "🕌 Namoz"}
+    lines = []
+    for t in tasks:
+        label = type_labels.get(t["task_type"], t["task_type"])
+        extra = ""
+        if t["task_type"] == "weekly":
+            extra = f" ({t['weekly_days']})"
+        elif t["task_type"] == "monthly":
+            extra = f" (har oy {t['monthly_day']}-sana)"
+        time_part = f" — {t['time_str']}" if t["time_str"] else ""
+        lines.append(f"{label}{extra}: {t['text']}{time_part}")
+
+    await update.message.reply_text("📋 Sizning vazifalaringiz:\n\n" + "\n".join(lines))
+
+
+@require_boshqaruvchi
+async def cmd_vazifa_ochir(update: Update, context: ContextTypes.DEFAULT_TYPE, user):
+    tasks = [t for t in db.get_boss_tasks(user["id"]) if t["task_type"] != "prayer"]
+    if not tasks:
+        await update.message.reply_text("O'chirish mumkin bo'lgan vazifa yo'q.")
+        return
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(t["text"][:50], callback_data=f"deltask:{t['id']}")]
+        for t in tasks
+    ])
+    await update.message.reply_text("Qaysi vazifani o'chiramiz?", reply_markup=kb)
+
+
+async def task_delete_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    task_id = int(query.data.split(":")[1])
+    db.deactivate_boss_task(task_id)
+    await query.edit_message_text("✅ Vazifa o'chirildi.")
+
+
+# ---------------- BAJARILDI TUGMASI ----------------
+
+async def boss_task_done_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    task_id = int(query.data.split(":")[1])
+    today_str = date.today().isoformat()
+    db.mark_boss_task_done(task_id, today_str)
+    await query.edit_message_text(query.message.text + "\n\n✅ Bajarildi deb belgilandi.")
+
+
+# ---------------- JUMA KUNI NAMOZ VAQTLARINI SO'RASH ----------------
+
+async def ask_friday_prayer_times(context: ContextTypes.DEFAULT_TYPE):
+    """Har juma kuni, ertalab, boshqaruvchilardan yangi hafta uchun namoz
+    vaqtlarini so'raydi."""
+    bosses = db.list_users_by_role("boshqaruvchi")
+    for user in bosses:
+        context.application.user_data.setdefault(user["telegram_id"], {})[
+            "prayer_update_user_id"] = user["id"]
+        try:
+            await context.bot.send_message(
+                chat_id=user["telegram_id"],
+                text=("🕌 Yangi hafta uchun namoz vaqtlarini yangilaylik.\n\n"
+                      "Bomdod namozi vaqtini kiriting (masalan 05:00):"),
+            )
+        except Exception as e:
+            logger.warning(f"Namoz vaqti so'rovi yuborilmadi ({user['full_name']}): {e}")
+
+
+@require_boshqaruvchi
+async def cmd_namoz_vaqtlari(update: Update, context: ContextTypes.DEFAULT_TYPE, user):
+    """Boshqaruvchi o'zi /namoz_vaqtlari buyrug'i bilan ham yangilashni boshlashi mumkin."""
+    context.user_data["prayer_update_user_id"] = user["id"]
+    await update.message.reply_text("Bomdod namozi vaqtini kiriting (masalan 05:00):")
+    return PRAYER_BOMDOD
+
+
+def _validate_time(text):
+    try:
+        datetime.strptime(text.strip(), "%H:%M")
+        return text.strip()
+    except ValueError:
+        return None
+
+
+async def prayer_bomdod_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    t = _validate_time(update.message.text)
+    if not t:
+        await update.message.reply_text("Noto'g'ri format (masalan 05:00). Qaytadan:")
+        return PRAYER_BOMDOD
+    context.user_data["prayer_times"] = {"bomdod": t}
+    await update.message.reply_text("Peshin namozi vaqtini kiriting:")
+    return PRAYER_PESHIN
+
+
+async def prayer_peshin_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    t = _validate_time(update.message.text)
+    if not t:
+        await update.message.reply_text("Noto'g'ri format. Qaytadan:")
+        return PRAYER_PESHIN
+    context.user_data["prayer_times"]["peshin"] = t
+    await update.message.reply_text("Asr namozi vaqtini kiriting:")
+    return PRAYER_ASR
+
+
+async def prayer_asr_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    t = _validate_time(update.message.text)
+    if not t:
+        await update.message.reply_text("Noto'g'ri format. Qaytadan:")
+        return PRAYER_ASR
+    context.user_data["prayer_times"]["asr"] = t
+    await update.message.reply_text("Shom namozi vaqtini kiriting:")
+    return PRAYER_SHOM
+
+
+async def prayer_shom_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    t = _validate_time(update.message.text)
+    if not t:
+        await update.message.reply_text("Noto'g'ri format. Qaytadan:")
+        return PRAYER_SHOM
+    context.user_data["prayer_times"]["shom"] = t
+    await update.message.reply_text("Xufton namozi vaqtini kiriting:")
+    return PRAYER_XUFTON
+
+
+async def prayer_xufton_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    t = _validate_time(update.message.text)
+    if not t:
+        await update.message.reply_text("Noto'g'ri format. Qaytadan:")
+        return PRAYER_XUFTON
+
+    pt = context.user_data["prayer_times"]
+    user_id = context.user_data.get("prayer_update_user_id")
+    db.set_prayer_times(user_id, pt["bomdod"], pt["peshin"], pt["asr"], pt["shom"], t)
+    db.ensure_prayer_tasks(user_id)
+
+    await update.message.reply_text(
+        f"✅ Namoz vaqtlari yangilandi:\n"
+        f"Bomdod: {pt['bomdod']} | Peshin: {pt['peshin']} | Asr: {pt['asr']} | "
+        f"Shom: {pt['shom']} | Xufton: {t}"
+    )
+    context.user_data.pop("prayer_times", None)
+    context.user_data.pop("prayer_update_user_id", None)
+    return ConversationHandler.END
+
+
+# ---------------- KUNLIK 08:00 RO'YXAT ----------------
+
+async def send_boss_daily_tasklist(context: ContextTypes.DEFAULT_TYPE):
+    """Har kuni 08:00da, boshqaruvchiga bugungi BARCHA vazifalarini
+    bitta xabarda, bajarish tugmalari bilan yuboradi."""
+    bosses = db.list_users_by_role("boshqaruvchi")
+    today = date.today()
+
+    for user in bosses:
+        tasks = db.get_tasks_for_today(user["id"], today)
+        if not tasks:
+            continue
+
+        lines = ["📌 Bugungi vazifalaringiz:\n"]
+        buttons = []
+        for t in tasks:
+            time_part = f" ({t['time_str']})" if t["time_str"] else ""
+            label = t["text"]
+            if t["task_type"] == "prayer":
+                pt = db.get_prayer_times(user["id"])
+                prayer_time = pt.get(t["prayer_name"]) if pt else None
+                time_part = f" ({prayer_time})" if prayer_time else ""
+                label = f"🕌 {t['text']}"
+            lines.append(f"• {label}{time_part}")
+            buttons.append([InlineKeyboardButton(
+                f"✅ {label[:40]}", callback_data=f"bosstask:{t['id']}"
+            )])
+
+        try:
+            await context.bot.send_message(
+                chat_id=user["telegram_id"],
+                text="\n".join(lines),
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except Exception as e:
+            logger.warning(f"Kunlik vazifa ro'yxati yuborilmadi "
+                            f"({user['full_name']}): {e}")
+
+
+# ---------------- SOATLIK ESLATMALAR (vaqti o'tib, bajarilmagan) ----------------
+
+async def check_boss_task_reminders(context: ContextTypes.DEFAULT_TYPE):
+    """Har soat ishga tushadi (09:00-23:00 oralig'ida). Vaqti o'tib ketgan,
+    lekin hali bajarilmagan vazifalar uchun qattiqroq eslatma yuboradi."""
+    now = datetime.now()
+    if now.hour < 9 or now.hour >= 23:
+        return
+
+    today = date.today()
+    today_str = today.isoformat()
+    bosses = db.list_users_by_role("boshqaruvchi")
+
+    for user in bosses:
+        tasks = db.get_tasks_for_today(user["id"], today)
+        for t in tasks:
+            task_time_str = t["time_str"]
+            if t["task_type"] == "prayer":
+                pt = db.get_prayer_times(user["id"])
+                task_time_str = pt.get(t["prayer_name"]) if pt else None
+            if not task_time_str:
+                continue
+
+            try:
+                task_time = datetime.strptime(task_time_str, "%H:%M").time()
+            except ValueError:
+                continue
+
+            if now.time() < task_time:
+                continue  # vaqti hali kelmagan
+
+            if db.is_boss_task_done(t["id"], today_str):
+                continue  # allaqachon bajarilgan
+
+            last_reminder = db.get_last_reminder(t["id"], today_str)
+            current_hour_str = now.strftime("%H:00")
+            if last_reminder == current_hour_str:
+                continue  # shu soatda allaqachon eslatilgan
+
+            db.update_last_reminder(t["id"], today_str, current_hour_str)
+
+            if t["task_type"] == "prayer":
+                hadith_text, hadith_source = random.choice(db.PRAYER_HADITHS)
+                text = (
+                    f"🕌 {t['text']} namozi vaqti keldi, hali o'qimadingiz!\n\n"
+                    f"{hadith_text}\n— {hadith_source}\n\n"
+                    f"{db.PRAYER_CLOSING_NOTE}\n\n"
+                    f"Namozingizni o'qing! 🤲"
+                )
+            else:
+                text = (
+                    f"⚠️ DIQQAT! \"{t['text']}\" vazifasi {task_time_str}da "
+                    f"bajarilishi kerak edi, lekin hali bajarilmadi!\n\n"
+                    f"Iltimos, darhol bajaring — vaqt isrof bo'lyapti!"
+                )
+
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Bajarildi", callback_data=f"bosstask:{t['id']}")
+            ]])
+            try:
+                await context.bot.send_message(
+                    chat_id=user["telegram_id"], text=text, reply_markup=kb,
+                )
+            except Exception as e:
+                logger.warning(f"Eslatma yuborilmadi ({user['full_name']}): {e}")
+
+
+# ---------------- 23:00 KUN YOPILISHI — SHAXSIY HISOBOT ----------------
+
+async def send_boss_end_of_day_report(context: ContextTypes.DEFAULT_TYPE):
+    """Har kuni 23:00da, boshqaruvchining o'ziga, bugungi bajarilgan/
+    bajarilmagan vazifalari haqida shaxsiy hisobot yuboradi."""
+    bosses = db.list_users_by_role("boshqaruvchi")
+    today_str = date.today().isoformat()
+
+    for user in bosses:
+        report = db.get_boss_daily_report(user["id"], today_str)
+        if not report:
+            continue
+
+        done_items = [r for r in report if r["done"]]
+        not_done_items = [r for r in report if not r["done"]]
+
+        lines = [f"📊 Bugungi hisobot — {today_str}\n"]
+        lines.append(f"✅ Bajarilgan ({len(done_items)}):")
+        for r in done_items:
+            lines.append(f"  • {r['text']}")
+        if not_done_items:
+            lines.append(f"\n❌ Bajarilmagan ({len(not_done_items)}):")
+            for r in not_done_items:
+                lines.append(f"  • {r['text']}")
+
+        try:
+            await context.bot.send_message(
+                chat_id=user["telegram_id"], text="\n".join(lines),
+            )
+        except Exception as e:
+            logger.warning(f"Kunlik hisobot yuborilmadi ({user['full_name']}): {e}")
+
+
 # ---------------- ASOSIY ----------------
 
 async def setup_bot_commands(app: Application):
@@ -737,6 +1139,10 @@ async def setup_bot_commands(app: Application):
         BotCommand("ochilish", "Kunlik ochilish cheklisti"),
         BotCommand("yopilish", "Kunlik yopilish cheklisti"),
         BotCommand("holat", "Bugungi holatni ko'rish"),
+        BotCommand("vazifa_qosh", "Yangi shaxsiy vazifa qo'shish (boshqaruvchi)"),
+        BotCommand("vazifalarim", "Mening vazifalarim ro'yxati (boshqaruvchi)"),
+        BotCommand("vazifa_ochir", "Vazifani o'chirish (boshqaruvchi)"),
+        BotCommand("namoz_vaqtlari", "Namoz vaqtlarini yangilash (boshqaruvchi)"),
     ])
 
 
@@ -753,13 +1159,55 @@ def main():
         fallbacks=[],
     )
 
+    task_add_handler = ConversationHandler(
+        entry_points=[CommandHandler("vazifa_qosh", cmd_vazifa_qosh)],
+        states={
+            TASK_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, task_text_received)],
+            TASK_TYPE: [CallbackQueryHandler(task_type_chosen, pattern="^ttype:")],
+            TASK_WEEKLY_DAYS: [MessageHandler(
+                filters.TEXT & ~filters.COMMAND, task_weekly_days_received
+            )],
+            TASK_MONTHLY_DAY: [MessageHandler(
+                filters.TEXT & ~filters.COMMAND, task_monthly_day_received
+            )],
+            TASK_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, task_time_received)],
+        },
+        fallbacks=[],
+    )
+
+    prayer_update_handler = ConversationHandler(
+        entry_points=[CommandHandler("namoz_vaqtlari", cmd_namoz_vaqtlari)],
+        states={
+            PRAYER_BOMDOD: [MessageHandler(
+                filters.TEXT & ~filters.COMMAND, prayer_bomdod_received
+            )],
+            PRAYER_PESHIN: [MessageHandler(
+                filters.TEXT & ~filters.COMMAND, prayer_peshin_received
+            )],
+            PRAYER_ASR: [MessageHandler(
+                filters.TEXT & ~filters.COMMAND, prayer_asr_received
+            )],
+            PRAYER_SHOM: [MessageHandler(
+                filters.TEXT & ~filters.COMMAND, prayer_shom_received
+            )],
+            PRAYER_XUFTON: [MessageHandler(
+                filters.TEXT & ~filters.COMMAND, prayer_xufton_received
+            )],
+        },
+        fallbacks=[],
+    )
+
     app.add_handler(reg_handler)
+    app.add_handler(task_add_handler)
+    app.add_handler(prayer_update_handler)
     app.add_handler(CallbackQueryHandler(admin_decision, pattern="^(approve|reject):"))
     app.add_handler(CommandHandler("ochilish", cmd_ochilish))
     app.add_handler(CommandHandler("yopilish", cmd_yopilish))
     app.add_handler(CommandHandler("holat", cmd_holat))
     app.add_handler(CommandHandler("chatid", cmd_chatid))  # VAQTINCHA
     app.add_handler(CommandHandler("hisobot", cmd_hisobot))
+    app.add_handler(CommandHandler("vazifalarim", cmd_vazifalarim))
+    app.add_handler(CommandHandler("vazifa_ochir", cmd_vazifa_ochir))
     for role_key in ROLES:
         app.add_handler(CommandHandler(
             f"hisobot_{role_key}", make_period_role_report_handler(role_key)
@@ -767,6 +1215,8 @@ def main():
     app.add_handler(CallbackQueryHandler(checklist_toggle, pattern="^toggle:"))
     app.add_handler(CallbackQueryHandler(checklist_finish_button, pattern="^finish$"))
     app.add_handler(CallbackQueryHandler(per_message_answer, pattern="^pm_(done|notdone):"))
+    app.add_handler(CallbackQueryHandler(task_delete_chosen, pattern="^deltask:"))
+    app.add_handler(CallbackQueryHandler(boss_task_done_button, pattern="^bosstask:"))
 
     if ADMIN_GROUP_ID:
         app.add_handler(MessageHandler(
@@ -809,6 +1259,30 @@ def main():
         app.job_queue.run_daily(
             auto_finalize_seller_closing,
             time=datetime.strptime("21:00", "%H:%M").time(),
+        )
+
+        # ---- Boshliq shaxsiy vazifalari ----
+        # Har kuni 08:00da, bugungi vazifalar ro'yxati
+        app.job_queue.run_daily(
+            send_boss_daily_tasklist,
+            time=datetime.strptime("08:00", "%H:%M").time(),
+        )
+        # Har soat (09:00-23:00), vaqti o'tib bajarilmagan vazifalar uchun eslatma
+        app.job_queue.run_repeating(
+            check_boss_task_reminders,
+            interval=3600,  # 1 soat
+            first=datetime.strptime("09:00", "%H:%M").time(),
+        )
+        # 23:00da, kunlik shaxsiy hisobot
+        app.job_queue.run_daily(
+            send_boss_end_of_day_report,
+            time=datetime.strptime("23:00", "%H:%M").time(),
+        )
+        # Har juma kuni ertalab 07:30da, namoz vaqtlarini yangilashni so'raydi
+        app.job_queue.run_daily(
+            ask_friday_prayer_times,
+            time=datetime.strptime("07:30", "%H:%M").time(),
+            days=(5,),  # PTB v20+: 0=yakshanba...6=shanba, demak juma=5
         )
 
     logger.info("Bot ishga tushdi...")
