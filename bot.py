@@ -364,6 +364,17 @@ async def finish_checklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Vaqt: {finished_at}")
 
     await query_or_message_reply(update, text)
+
+    if state["section"] == "yopilish":
+        closing_msg = (
+            "Bugungi ishingiz uchun rahmat! 🙏\n"
+            "Yaxshi dam oling, ertaga ko'rishguncha! 👋"
+        )
+        if update.callback_query:
+            await update.callback_query.message.reply_text(closing_msg)
+        else:
+            await update.message.reply_text(closing_msg)
+
     context.user_data.pop("checklist", None)
 
 
@@ -550,6 +561,26 @@ def _get_session_marks(app: Application, telegram_id: int):
     return state.get("section"), state.get("marks", {})
 
 
+async def send_morning_start_reminder(context: ContextTypes.DEFAULT_TYPE):
+    """Har kuni 08:30da: ochilishni hali BOSHLAMAGAN (yakunlamagan)
+    sotuvchi va brokerlarga, ishni boshlash haqida iliq eslatma."""
+    today_str = date.today().isoformat()
+
+    for role in ("sotuvchi", "broker"):
+        pending = db.get_pending_users_for_section(role, today_str, "ochilish")
+        for user in pending:
+            try:
+                await context.bot.send_message(
+                    chat_id=user["telegram_id"],
+                    text=("Assalomu alaykum! Kuningiz yaxshi boshlandimi? 🌅\n\n"
+                          "Cheklistlarni boshlaylik endi — /ochilish tugmasini "
+                          "bosing va ishni boshlang."),
+                )
+            except Exception as e:
+                logger.warning(f"Ertalabki eslatma yuborilmadi "
+                                f"({user['full_name']}): {e}")
+
+
 async def send_seller_opening_warning(context: ContextTypes.DEFAULT_TYPE):
     """Har kuni 14:00da: ochilishni hali yakunlamagan sotuvchilarga,
     bajarilmagan bandlar ro'yxati bilan shaxsiy ogohlantirish."""
@@ -624,6 +655,11 @@ async def auto_finalize_seller_closing(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id=user["telegram_id"],
                 text="⏰ Vaqt tugadi. Yopilish cheklisti avtomatik yakunlandi.",
+            )
+            await context.bot.send_message(
+                chat_id=user["telegram_id"],
+                text=("Bugungi ishingiz uchun rahmat! 🙏\n"
+                      "Yaxshi dam oling, ertaga ko'rishguncha! 👋"),
             )
         except Exception as e:
             logger.warning(f"Xabar yuborilmadi ({user['full_name']}): {e}")
@@ -704,6 +740,11 @@ def main():
         app.job_queue.run_daily(
             send_previous_day_warning,
             time=datetime.strptime("08:05", "%H:%M").time(),
+        )
+        # 08:30da, ochilishni hali boshlamaganlarga (sotuvchi+broker) eslatma
+        app.job_queue.run_daily(
+            send_morning_start_reminder,
+            time=datetime.strptime("08:30", "%H:%M").time(),
         )
         # 14:00da ochilish bo'yicha ogohlantirish (faqat sotuvchi)
         app.job_queue.run_daily(
