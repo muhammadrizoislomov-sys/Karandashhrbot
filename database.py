@@ -653,6 +653,35 @@ def mark_boss_task_done(task_id, log_date):
             conn.execute("UPDATE boss_tasks SET active = 0 WHERE id = ?", (task_id,))
 
 
+def mark_boss_task_not_done(task_id, log_date):
+    """Vazifani 'bajarilmadi' deb belgilaydi (✅ ni bekor qilish uchun ham
+    ishlatiladi — toggle qaytarilishi mumkin)."""
+    with get_conn() as conn:
+        existing = conn.execute(
+            "SELECT * FROM boss_task_log WHERE task_id = ? AND log_date = ?",
+            (task_id, log_date),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE boss_task_log SET done = 0, done_at = NULL "
+                "WHERE task_id = ? AND log_date = ?",
+                (task_id, log_date),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO boss_task_log (task_id, log_date, done) VALUES (?, ?, 0)",
+                (task_id, log_date),
+            )
+
+
+def get_boss_task_by_id(task_id):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM boss_tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
 def update_last_reminder(task_id, log_date, time_str):
     with get_conn() as conn:
         existing = conn.execute(

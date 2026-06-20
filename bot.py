@@ -849,29 +849,8 @@ async def cmd_vazifalarim(update: Update, context: ContextTypes.DEFAULT_TYPE, us
         )
         return
 
-    today_str = today.isoformat()
-    lines = ["📋 Bugungi vazifalaringiz:\n"]
-    buttons = []
-    for t in tasks:
-        done = db.is_boss_task_done(t["id"], today_str)
-        time_part = f" ({t['time_str']})" if t["time_str"] else ""
-        label = t["text"]
-        if t["task_type"] == "prayer":
-            pt = db.get_prayer_times(user["id"])
-            prayer_time = pt.get(t["prayer_name"]) if pt else None
-            time_part = f" ({prayer_time})" if prayer_time else ""
-            label = f"🕌 {t['text']}"
-
-        status_icon = "✅" if done else "⬜"
-        lines.append(f"{status_icon} {label}{time_part}")
-
-        if not done:
-            buttons.append([InlineKeyboardButton(
-                f"✅ {label[:40]}", callback_data=f"bosstask:{t['id']}"
-            )])
-
-    kb = InlineKeyboardMarkup(buttons) if buttons else None
-    await update.message.reply_text("\n".join(lines), reply_markup=kb)
+    text, kb = build_boss_tasklist_view(user["id"], today)
+    await update.message.reply_text(text, reply_markup=kb)
 
 
 @require_boshqaruvchi
@@ -895,9 +874,65 @@ async def task_delete_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.edit_message_text("✅ Vazifa o'chirildi.")
 
 
-# ---------------- BAJARILDI TUGMASI ----------------
+# ---------------- BAJARILDI / BAJARILMADI TUGMALARI ----------------
 
-async def boss_task_done_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def build_boss_tasklist_view(user_id, check_date):
+    """Berilgan kun uchun boshliq vazifalari matnini va tugmalarini quradi."""
+    tasks = db.get_tasks_for_today(user_id, check_date)
+    check_date_str = check_date.isoformat()
+
+    lines = ["📋 Bugungi vazifalaringiz:\n"]
+    buttons = []
+    for t in tasks:
+        done = db.is_boss_task_done(t["id"], check_date_str)
+        time_part = f" ({t['time_str']})" if t["time_str"] else ""
+        label = t["text"]
+        if t["task_type"] == "prayer":
+            pt = db.get_prayer_times(user_id)
+            prayer_time = pt.get(t["prayer_name"]) if pt else None
+            time_part = f" ({prayer_time})" if prayer_time else ""
+            label = f"🕌 {t['text']}"
+
+        status_icon = "✅" if done else "⬜"
+        lines.append(f"{status_icon} {label}{time_part}")
+
+        buttons.append([
+            InlineKeyboardButton(
+                f"✅ {label[:30]}", callback_data=f"bosstask_done:{t['id']}"
+            ),
+            InlineKeyboardButton(
+                f"❌ {label[:30]}", callback_data=f"bosstask_notdone:{t['id']}"
+            ),
+        ])
+
+    text = "\n".join(lines)
+    kb = InlineKeyboardMarkup(buttons) if buttons else None
+    return text, kb
+
+
+async def boss_task_status_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """✅/❌ tugmalari bosilganda, vazifa holatini yangilaydi va BUTUN
+    ro'yxatni qayta chizadi (boshqa vazifalar yo'qolib qolmasin)."""
+    query = update.callback_query
+    await query.answer()
+    action, task_id_str = query.data.split(":")
+    task_id = int(task_id_str)
+    today = date.today()
+    today_str = today.isoformat()
+
+    if action == "bosstask_done":
+        db.mark_boss_task_done(task_id, today_str)
+    else:
+        db.mark_boss_task_not_done(task_id, today_str)
+
+    task = db.get_boss_task_by_id(task_id)
+    text, kb = build_boss_tasklist_view(task["user_id"], today)
+    await query.edit_message_text(text, reply_markup=kb)
+
+
+async def boss_task_reminder_done_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Soatlik eslatma xabaridagi '✅ Bajarildi' tugmasi — faqat shu
+    eslatma xabarini yangilaydi, ro'yxatni qayta chizmaydi."""
     query = update.callback_query
     await query.answer()
     task_id = int(query.data.split(":")[1])
@@ -1015,26 +1050,10 @@ async def send_boss_daily_tasklist(context: ContextTypes.DEFAULT_TYPE):
         if not tasks:
             continue
 
-        lines = ["📌 Bugungi vazifalaringiz:\n"]
-        buttons = []
-        for t in tasks:
-            time_part = f" ({t['time_str']})" if t["time_str"] else ""
-            label = t["text"]
-            if t["task_type"] == "prayer":
-                pt = db.get_prayer_times(user["id"])
-                prayer_time = pt.get(t["prayer_name"]) if pt else None
-                time_part = f" ({prayer_time})" if prayer_time else ""
-                label = f"🕌 {t['text']}"
-            lines.append(f"• {label}{time_part}")
-            buttons.append([InlineKeyboardButton(
-                f"✅ {label[:40]}", callback_data=f"bosstask:{t['id']}"
-            )])
-
+        text, kb = build_boss_tasklist_view(user["id"], today)
         try:
             await context.bot.send_message(
-                chat_id=user["telegram_id"],
-                text="\n".join(lines),
-                reply_markup=InlineKeyboardMarkup(buttons),
+                chat_id=user["telegram_id"], text=text, reply_markup=kb,
             )
         except Exception as e:
             logger.warning(f"Kunlik vazifa ro'yxati yuborilmadi "
@@ -1098,7 +1117,7 @@ async def check_boss_task_reminders(context: ContextTypes.DEFAULT_TYPE):
                 )
 
             kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Bajarildi", callback_data=f"bosstask:{t['id']}")
+                InlineKeyboardButton("✅ Bajarildi", callback_data=f"bosstask_remind:{t['id']}")
             ]])
             try:
                 await context.bot.send_message(
@@ -1227,7 +1246,12 @@ def main():
     app.add_handler(CallbackQueryHandler(checklist_finish_button, pattern="^finish$"))
     app.add_handler(CallbackQueryHandler(per_message_answer, pattern="^pm_(done|notdone):"))
     app.add_handler(CallbackQueryHandler(task_delete_chosen, pattern="^deltask:"))
-    app.add_handler(CallbackQueryHandler(boss_task_done_button, pattern="^bosstask:"))
+    app.add_handler(CallbackQueryHandler(
+        boss_task_status_button, pattern="^bosstask_(done|notdone):"
+    ))
+    app.add_handler(CallbackQueryHandler(
+        boss_task_reminder_done_button, pattern="^bosstask_remind:"
+    ))
 
     if ADMIN_GROUP_ID:
         app.add_handler(MessageHandler(
