@@ -281,19 +281,62 @@ async def per_message_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def per_message_comment_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Foydalanuvchi izoh yozganda (allow_comment bandidan keyin) chaqiriladi."""
+    """Foydalanuvchi izoh yozganda (allow_comment bandidan keyin) chaqiriladi.
+    Agar izoh kutilmasa va bu admin guruhdan kelmagan oddiy xabar bo'lsa,
+    xabarni admin guruhga forward qiladi (qo'llab-quvvatlash uchun)."""
     item_id = context.user_data.get("awaiting_comment_for")
     state = context.user_data.get("checklist")
-    if not item_id or not state:
-        return  # Bu oddiy xabar, cheklistga aloqasi yo'q
+    if item_id and state:
+        comment_text = update.message.text
+        state["comments"][item_id] = comment_text
+        context.user_data.pop("awaiting_comment_for", None)
 
-    comment_text = update.message.text
-    state["comments"][item_id] = comment_text
-    context.user_data.pop("awaiting_comment_for", None)
+        await update.message.reply_text("Izoh qabul qilindi.")
+        state["index"] += 1
+        await send_per_message_item(update, context)
+        return
 
-    await update.message.reply_text("Izoh qabul qilindi.")
-    state["index"] += 1
-    await send_per_message_item(update, context)
+    # Bu — cheklistga aloqasi yo'q, oddiy xabar.
+    # Agar admin guruhdan kelmagan bo'lsa (ya'ni xodimdan), forward qilamiz.
+    if not ADMIN_GROUP_ID or str(update.effective_chat.id) == str(ADMIN_GROUP_ID):
+        return
+
+    user = db.get_user(update.effective_user.id)
+    if not user or not user["approved"]:
+        return  # Ro'yxatdan o'tmagan/tasdiqlanmagan odamlardan xabar forward qilinmaydi
+
+    role_label = ROLES.get(user["role"], user["role"])
+    forwarded = await context.bot.send_message(
+        chat_id=ADMIN_GROUP_ID,
+        text=(f"✉️ {user['full_name']} ({role_label}):\n\n{update.message.text}"),
+    )
+    # Forward qilingan xabar ID sini, qaysi xodimga tegishli ekanini bilish
+    # uchun saqlaymiz (admin shu xabarga Reply qilganda topish uchun)
+    context.bot_data.setdefault("support_map", {})[forwarded.message_id] = (
+        update.effective_user.id
+    )
+    await update.message.reply_text("Xabaringiz adminga yuborildi. Javobni shu yerda kutib turing.")
+
+
+async def admin_reply_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin guruhda, forward qilingan xabarga Reply qilinganda, javobni
+    tegishli xodimga yuboradi."""
+    if not update.message.reply_to_message:
+        return
+    support_map = context.bot_data.get("support_map", {})
+    original_id = update.message.reply_to_message.message_id
+    target_telegram_id = support_map.get(original_id)
+    if not target_telegram_id:
+        return  # Bu forward qilingan support xabari emas
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_telegram_id,
+            text=f"💬 Admin javobi:\n\n{update.message.text}",
+        )
+        await update.message.reply_text("Javob xodimga yuborildi. ✅")
+    except Exception as e:
+        await update.message.reply_text(f"Xabar yuborilmadi: {e}")
 
 
 async def checklist_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -726,6 +769,14 @@ def main():
     app.add_handler(CallbackQueryHandler(checklist_toggle, pattern="^toggle:"))
     app.add_handler(CallbackQueryHandler(checklist_finish_button, pattern="^finish$"))
     app.add_handler(CallbackQueryHandler(per_message_answer, pattern="^pm_(done|notdone):"))
+
+    if ADMIN_GROUP_ID:
+        app.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND
+            & filters.Chat(chat_id=int(ADMIN_GROUP_ID))
+            & filters.REPLY,
+            admin_reply_received,
+        ))
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND, per_message_comment_received
     ))
