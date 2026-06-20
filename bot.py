@@ -841,26 +841,37 @@ async def task_time_received(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 @require_boshqaruvchi
 async def cmd_vazifalarim(update: Update, context: ContextTypes.DEFAULT_TYPE, user):
-    tasks = db.get_boss_tasks(user["id"])
+    today = date.today()
+    tasks = db.get_tasks_for_today(user["id"], today)
     if not tasks:
-        await update.message.reply_text("Hozircha vazifalar yo'q. /vazifa_qosh orqali qo'shing.")
+        await update.message.reply_text(
+            "Bugun uchun vazifalar yo'q. /vazifa_qosh orqali yangi vazifa qo'shing."
+        )
         return
 
-    type_labels = {"daily": "🔁 Har kuni", "weekly": "📅 Har hafta",
-                   "monthly": "🗓️ Har oy", "once": "1️⃣ Bir martalik",
-                   "prayer": "🕌 Namoz"}
-    lines = []
+    today_str = today.isoformat()
+    lines = ["📋 Bugungi vazifalaringiz:\n"]
+    buttons = []
     for t in tasks:
-        label = type_labels.get(t["task_type"], t["task_type"])
-        extra = ""
-        if t["task_type"] == "weekly":
-            extra = f" ({t['weekly_days']})"
-        elif t["task_type"] == "monthly":
-            extra = f" (har oy {t['monthly_day']}-sana)"
-        time_part = f" — {t['time_str']}" if t["time_str"] else ""
-        lines.append(f"{label}{extra}: {t['text']}{time_part}")
+        done = db.is_boss_task_done(t["id"], today_str)
+        time_part = f" ({t['time_str']})" if t["time_str"] else ""
+        label = t["text"]
+        if t["task_type"] == "prayer":
+            pt = db.get_prayer_times(user["id"])
+            prayer_time = pt.get(t["prayer_name"]) if pt else None
+            time_part = f" ({prayer_time})" if prayer_time else ""
+            label = f"🕌 {t['text']}"
 
-    await update.message.reply_text("📋 Sizning vazifalaringiz:\n\n" + "\n".join(lines))
+        status_icon = "✅" if done else "⬜"
+        lines.append(f"{status_icon} {label}{time_part}")
+
+        if not done:
+            buttons.append([InlineKeyboardButton(
+                f"✅ {label[:40]}", callback_data=f"bosstask:{t['id']}"
+            )])
+
+    kb = InlineKeyboardMarkup(buttons) if buttons else None
+    await update.message.reply_text("\n".join(lines), reply_markup=kb)
 
 
 @require_boshqaruvchi
