@@ -5,7 +5,8 @@ cheklist shablonlari, va kunlik javoblar.
 """
 
 import sqlite3
-from datetime import datetime, date
+import calendar
+from datetime import datetime, date, timedelta
 from contextlib import contextmanager
 
 DB_PATH = "data/karandash.db"
@@ -43,12 +44,13 @@ def init_db():
         CREATE TABLE IF NOT EXISTS checklist_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             role TEXT NOT NULL,
-            section TEXT NOT NULL,        -- 'ochilish' | 'yopilish' | 'haftalik'
+            section TEXT NOT NULL,        -- 'ochilish' | 'yopilish' | 'haftalik' | 'oyoxiri'
             item_number TEXT NOT NULL,    -- '1', '15a', '19.1' kabi
             text TEXT NOT NULL,
             weekly_days TEXT,             -- masalan 'mon,thu' faqat haftalik bandlar uchun
             active INTEGER DEFAULT 1,
-            sort_order INTEGER DEFAULT 0
+            sort_order INTEGER DEFAULT 0,
+            allow_comment INTEGER DEFAULT 0  -- 1 bo'lsa, band uchun izoh yozish so'raladi
         )
         """)
 
@@ -59,6 +61,7 @@ def init_db():
             item_id INTEGER NOT NULL,
             submission_date TEXT NOT NULL,   -- 'YYYY-MM-DD'
             done INTEGER DEFAULT 0,
+            comment TEXT,                    -- ixtiyoriy izoh (masalan oprixodavaniya uchun)
             submitted_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id),
             FOREIGN KEY (item_id) REFERENCES checklist_items(id)
@@ -138,14 +141,86 @@ def list_users_by_role(role: str = None):
 
 # ---------- CHECKLIST ITEMS ----------
 
-def add_checklist_item(role, section, item_number, text, weekly_days=None, sort_order=0):
+def get_monthend_window(check_date: date):
+    """Berilgan sana uchun, shu sana qaysi 'oy oxiri ko'rinish oynasi'ga
+    tegishli ekanini aniqlaydi. Oyna: shu oy oxirgi kunidan navbatdagi
+    oyning 3-sanasigacha. Agar check_date shu oyna ichida bo'lmasa, None
+    qaytaradi. Aks holda, oynani identifikatsiya qiluvchi 'YYYY-MM' (asosiy
+    oy, ya'ni oxirgi kuni bo'lgan oy) qaytaradi."""
+    year, month = check_date.year, check_date.month
+    last_day_this_month = calendar.monthrange(year, month)[1]
+
+    # Holat A: check_date - shu oyning OXIRGI kuni
+    if check_date.day == last_day_this_month:
+        return f"{year}-{month:02d}"
+
+    # Holat B: check_date - OLDINGI oyning oxirgi kunidan keyin,
+    # joriy oyning 1-3 sanasi ichida (oldingi oyning oynasi davom etmoqda)
+    if check_date.day <= 3:
+        if month == 1:
+            prev_year, prev_month = year - 1, 12
+        else:
+            prev_year, prev_month = year, month - 1
+        return f"{prev_year}-{prev_month:02d}"
+
+    return None
+
+
+def is_monthend_item_done_for_window(user_id: int, item_id: int, window_key: str):
+    """Berilgan 'oy oxiri' bandi, shu oyna (window_key, masalan '2026-06')
+    davomida ALLAQACHON bajarilganmi (har qanday kunda)? Agar ha, band
+    qolgan kunlarda endi ko'rsatilmaydi."""
+    year, month = map(int, window_key.split("-"))
+    last_day = calendar.monthrange(year, month)[1]
+    window_start = date(year, month, last_day)
+    if month == 12:
+        next_year, next_month = year + 1, 1
+    else:
+        next_year, next_month = year, month + 1
+    window_end = date(next_year, next_month, 3)
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT submission_date, done FROM submissions
+               WHERE user_id = ? AND item_id = ?
+                 AND submission_date >= ? AND submission_date <= ?""",
+            (user_id, item_id, window_start.isoformat(), window_end.isoformat()),
+        ).fetchall()
+        return any(r["done"] for r in rows)
+
+
+def add_checklist_item(role, section, item_number, text, weekly_days=None,
+                        sort_order=0, allow_comment=0):
     with get_conn() as conn:
         conn.execute(
             """INSERT INTO checklist_items
-               (role, section, item_number, text, weekly_days, sort_order)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (role, section, item_number, text, weekly_days, sort_order),
+               (role, section, item_number, text, weekly_days, sort_order, allow_comment)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (role, section, item_number, text, weekly_days, sort_order, allow_comment),
         )
+
+
+def get_visible_monthend_items(role: str, user_id: int, check_date: date):
+    """Berilgan kunda, shu foydalanuvchi uchun KO'RINISHI kerak bo'lgan
+    'oyoxiri' bandlarini qaytaradi (hali bajarilmagan va oyna ichida)."""
+    window_key = get_monthend_window(check_date)
+    if not window_key:
+        return []
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT * FROM checklist_items
+               WHERE role = ? AND section = 'oyoxiri' AND active = 1
+               ORDER BY sort_order, id""",
+            (role,),
+        ).fetchall()
+        items = [dict(r) for r in rows]
+
+    visible = []
+    for it in items:
+        if not is_monthend_item_done_for_window(user_id, it["id"], window_key):
+            visible.append(it)
+    return visible
 
 
 def get_checklist_items(role: str, section: str, today_weekday: str = None):
@@ -174,12 +249,13 @@ def get_checklist_items(role: str, section: str, today_weekday: str = None):
 
 # ---------- SUBMISSIONS ----------
 
-def save_submission(user_id: int, item_id: int, submission_date: str, done: bool):
+def save_submission(user_id: int, item_id: int, submission_date: str, done: bool,
+                     comment: str = None):
     with get_conn() as conn:
         conn.execute(
-            """INSERT INTO submissions (user_id, item_id, submission_date, done)
-               VALUES (?, ?, ?, ?)""",
-            (user_id, item_id, submission_date, 1 if done else 0),
+            """INSERT INTO submissions (user_id, item_id, submission_date, done, comment)
+               VALUES (?, ?, ?, ?, ?)""",
+            (user_id, item_id, submission_date, 1 if done else 0, comment),
         )
 
 
@@ -337,7 +413,7 @@ def get_all_items_with_status(user_id: int, report_date: str):
     (done=1/0). Bajarilganlar avval, keyin bajarilmaganlar."""
     with get_conn() as conn:
         rows = conn.execute(
-            """SELECT ci.item_number, ci.text, s.done
+            """SELECT ci.item_number, ci.text, s.done, s.comment
                FROM submissions s
                JOIN checklist_items ci ON ci.id = s.item_id
                WHERE s.user_id = ? AND s.submission_date = ?

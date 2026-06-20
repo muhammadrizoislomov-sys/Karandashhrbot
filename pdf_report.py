@@ -114,6 +114,11 @@ def generate_daily_pdf(report_date: str, output_path: str = None):
                 lines.append(
                     f'<font color="#B00020">[✗]</font> {it["text"]}'
                 )
+            if it.get("comment"):
+                lines.append(
+                    f'<font color="#555555"><i>&nbsp;&nbsp;&nbsp;&nbsp;Izoh: '
+                    f'{it["comment"]}</i></font>'
+                )
         items_block = "<br/>".join(lines)
         story.append(Paragraph(
             f"<b>{r['full_name']}</b> ({ROLE_LABELS.get(r['role'], r['role'])}):<br/>{items_block}",

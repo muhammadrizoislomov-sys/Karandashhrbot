@@ -75,5 +75,92 @@ for i, (num, text) in enumerate(yopilish_items):
 print(f"Yuklandi: {len(ochilish_items)} ochilish band, "
       f"{len(haftalik_items)} haftalik band, "
       f"{len(yopilish_items)} yopilish band — rol: {ROLE_SOTUVCHI}")
-print("Eslatma: Do'kon boshqaruvchisi, B2B menejer, Broker rollari uchun "
+
+# =====================================================================
+# BROKER ROLI
+# =====================================================================
+ROLE_BROKER = "broker"
+
+# ---------- OCHILISH bo'limi (sariq) ----------
+# Hujjatdagi 6ta "Muddati o'tgan lotlar" bandi BITTA umumiy bandga
+# birlashtirilgan — matn so'zma-so'z saqlangan, faqat bitta band sifatida
+broker_ochilish_items = [
+    ("1",
+     "Muddati o'tgan lotlar aktiv qilish kerak:\n\n"
+     "- Jizzax maxsus taminot — Xarid.uzex.uz elektron va milliy do'kon, "
+     "xt-xarid.uz elektron va milliy do'kon, "
+     "new.coorparation.uz elektron va milliy do'kon, "
+     "e-birja elektron va milliy do'kon\n\n"
+     "- Yatt Islomov P — Xarid.uzex.uz elektron va milliy do'kon, "
+     "xt-xarid.uz elektron va milliy do'kon\n\n"
+     "- Po'lat va Lola OK — Xarid.uzex.uz milliy do'kon, "
+     "xt-xarid.uz milliy do'kon\n\n"
+     "- Yatt Temirov Davidjon — Xarid.uzex.uz milliy do'kon, "
+     "xt-xarid.uz milliy do'kon\n\n"
+     "- Yatt Abduvaliyev (2ta birja) — Xarid.uzex.uz elektron va milliy "
+     "do'kon, xt-xarid.uz elektron va milliy do'kon\n\n"
+     "- Yatt Islomova Ozoda (2ta birja) — Xarid.uzex.uz milliy do'kon, "
+     "xt-xarid.uz milliy do'kon"),
+    ("2",
+     "Bizdan tanlangan lotlarga narx berib chiqildi:\n\n"
+     "- Jizzax maxsus taminot\n"
+     "- Yatt Islomov P\n"
+     "- Po'lat va Lola OK\n"
+     "- Yatt Temirov Davidjon\n"
+     "- Yatt Abduvaliyev\n"
+     "- Yatt Islomova Ozoda"),
+    ("3",
+     "Elektron do'konga qo'yilgan lotlar bo'yicha narxlar berildi:\n\n"
+     "- Jizzax maxsus taminot — xarid.uzex.uz va xt-xarid.uz\n"
+     "- Yatt Islomov P — xarid.uzex.uz va xt-xarid.uz\n"
+     "- Yatt Abduvaliyev — xarid.uzex.uz va xt-xarid.uz"),
+]
+
+# ---------- YOPILISH bo'limi (qizil) ----------
+broker_yopilish_items = [
+    ("4", "Moy skladdagi kunlik zadachalar tugatildi"),
+    ("5", "Kun yopilgach kassa hisob-kitobi to'liq tekshirildi"),
+    ("6", "Oprixodavaniya hamda spisaniyadagi tovarlar tekshirildi"),  # allow_comment=1
+    ("7", "CHOK to'liq tugatildi va skrenshot gruppaga tashlandi"),
+]
+
+# Faqat dushanba kuni chiqadigan qizil band
+broker_yopilish_weekly_items = [
+    ("5.1", "Har dushanba kunida toshkentga ishlatilgan pullar hisob "
+            "kitobi to'g'ri nazorat qilindi"),
+]
+
+# ---------- OY OXIRI bo'limi (yashil) ----------
+broker_oyoxiri_items = [
+    ("8",
+     "Har oy oxirida oy hisoboti yopildi.\n\n"
+     "Oy yopishda etibor beriladigan jihatlar:\n"
+     "1. Yetkazib beruvchilar bilan hisob kitoblar tekshiriladi.\n"
+     "2. Birja qoldiqlari tekshiriladi\n"
+     "3. Ish haqi hisoblanadi\n"
+     "4. Soliqlar hisoblanadi"),
+    ("9", "Har oyning ohirida xarajatlar nazorati jadvali to'ldirildi"),
+]
+
+for i, (num, text) in enumerate(broker_ochilish_items):
+    add_checklist_item(ROLE_BROKER, "ochilish", num, text, sort_order=i)
+
+for i, (num, text) in enumerate(broker_yopilish_items):
+    allow_comment = 1 if num == "6" else 0
+    add_checklist_item(ROLE_BROKER, "yopilish", num, text, sort_order=i,
+                        allow_comment=allow_comment)
+
+for i, (num, text) in enumerate(broker_yopilish_weekly_items):
+    add_checklist_item(ROLE_BROKER, "yopilish", num, text,
+                        weekly_days="mon", sort_order=50 + i)
+
+for i, (num, text) in enumerate(broker_oyoxiri_items):
+    add_checklist_item(ROLE_BROKER, "oyoxiri", num, text, sort_order=i)
+
+print(f"Yuklandi: {len(broker_ochilish_items)} ochilish band, "
+      f"{len(broker_yopilish_items)} yopilish band, "
+      f"{len(broker_yopilish_weekly_items)} haftalik (dushanba) band, "
+      f"{len(broker_oyoxiri_items)} oy oxiri band — rol: {ROLE_BROKER}")
+
+print("Eslatma: Do'kon boshqaruvchisi va B2B menejer rollari uchun "
       "bandlarni shu fayl ichiga xuddi shu uslubda qo'shing.")

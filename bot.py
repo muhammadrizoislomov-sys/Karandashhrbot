@@ -154,7 +154,7 @@ def require_approved_user(func):
     return wrapper
 
 
-# ---------------- CHEKLIST OQIMI ----------------
+# ---------------- CHEKLIST OQIMI (oddiy format — sotuvchi va boshqalar) ----------------
 
 def build_checklist_keyboard(items, marks):
     """Har bandga bitta tugma qator qiladi: [holat belgisi] band matni qisqartirilgan.
@@ -177,12 +177,23 @@ def build_checklist_text(section, items, marks):
             f"Har bandni bosib belgilang, so'ng \"✅ Yakunlash\" tugmasini bosing.")
 
 
+# Rollar uchun "har band — alohida xabar" formati (tugma matn bilan
+# cheklanmaydi, to'liq matn xabarning o'zida ko'rinadi)
+PER_MESSAGE_ROLES = {"broker"}
+
+
 async def start_checklist(update: Update, context: ContextTypes.DEFAULT_TYPE, user, section=None):
     """section parametri /ochilish yoki /yopilish handlerlaridan beriladi."""
     today = date.today()
     weekday = WEEKDAY_MAP[today.weekday()]
 
     items = db.get_checklist_items(user["role"], section, today_weekday=weekday)
+
+    # Broker uchun 'oyoxiri' bandlari yopilish bo'limiga avtomatik qo'shiladi
+    if user["role"] == "broker" and section == "yopilish":
+        monthend_items = db.get_visible_monthend_items(user["role"], user["id"], today)
+        items = items + monthend_items
+
     if not items:
         await update.message.reply_text(
             f"Sizning rolingiz uchun '{section}' cheklisti hali tayyorlanmagan."
@@ -193,13 +204,96 @@ async def start_checklist(update: Update, context: ContextTypes.DEFAULT_TYPE, us
         "section": section,
         "items": items,
         "marks": {},
+        "comments": {},
         "user_db_id": user["id"],
         "started_at": datetime.now().strftime("%H:%M"),
     }
 
-    text = build_checklist_text(section, items, {})
-    kb = build_checklist_keyboard(items, {})
-    await update.message.reply_text(text, reply_markup=kb)
+    if user["role"] in PER_MESSAGE_ROLES:
+        context.user_data["checklist"]["index"] = 0
+        await send_per_message_item(update, context)
+    else:
+        text = build_checklist_text(section, items, {})
+        kb = build_checklist_keyboard(items, {})
+        await update.message.reply_text(text, reply_markup=kb)
+
+
+# ---------------- CHEKLIST OQIMI (per-message format — broker) ----------------
+
+def build_per_item_keyboard(item):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅", callback_data=f"pm_done:{item['id']}"),
+        InlineKeyboardButton("❌", callback_data=f"pm_notdone:{item['id']}"),
+    ]])
+
+
+async def send_per_message_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    state = context.user_data["checklist"]
+    idx = state["index"]
+    items = state["items"]
+
+    if idx >= len(items):
+        await finish_checklist(update, context)
+        return
+
+    item = items[idx]
+    text = f"[{idx + 1}/{len(items)}] {item['item_number']}-band:\n\n{item['text']}"
+    kb = build_per_item_keyboard(item)
+
+    if update.callback_query:
+        await update.callback_query.message.reply_text(text, reply_markup=kb)
+    else:
+        await update.message.reply_text(text, reply_markup=kb)
+
+
+async def per_message_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    state = context.user_data.get("checklist")
+    if not state:
+        await query.answer("Sessiya tugagan. Qaytadan /ochilish yoki /yopilish bering.",
+                            show_alert=True)
+        return
+
+    action, item_id_str = query.data.split(":")
+    item_id = int(item_id_str)
+    done = (action == "pm_done")
+    state["marks"][item_id] = done
+
+    items = state["items"]
+    current_item = next((it for it in items if it["id"] == item_id), None)
+
+    await query.answer()
+    mark = "✅" if done else "❌"
+    await query.edit_message_text(
+        f"{mark} {current_item['item_number']}-band:\n\n{current_item['text']}"
+    )
+
+    # Agar band izoh yozishni talab qilsa (allow_comment=1)
+    if current_item and current_item.get("allow_comment"):
+        context.user_data["awaiting_comment_for"] = item_id
+        await query.message.reply_text(
+            "Iltimos, shu band bo'yicha izoh yozing (yo'q bo'lsa \"yo'q\" deb yozing):"
+        )
+        return  # Keyingi bandga o'tish izoh kelgandan keyin bo'ladi
+
+    state["index"] += 1
+    await send_per_message_item(update, context)
+
+
+async def per_message_comment_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Foydalanuvchi izoh yozganda (allow_comment bandidan keyin) chaqiriladi."""
+    item_id = context.user_data.get("awaiting_comment_for")
+    state = context.user_data.get("checklist")
+    if not item_id or not state:
+        return  # Bu oddiy xabar, cheklistga aloqasi yo'q
+
+    comment_text = update.message.text
+    state["comments"][item_id] = comment_text
+    context.user_data.pop("awaiting_comment_for", None)
+
+    await update.message.reply_text("Izoh qabul qilindi.")
+    state["index"] += 1
+    await send_per_message_item(update, context)
 
 
 async def checklist_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -241,11 +335,13 @@ async def finish_checklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_db_id = state["user_db_id"]
     items = state["items"]
     marks = state["marks"]
+    comments = state.get("comments", {})
 
     done_count = 0
     for item in items:
         done = bool(marks.get(item["id"], False))
-        db.save_submission(user_db_id, item["id"], today_str, done)
+        comment = comments.get(item["id"])
+        db.save_submission(user_db_id, item["id"], today_str, done, comment=comment)
         if done:
             done_count += 1
     total_count = len(items)
@@ -593,6 +689,10 @@ def main():
         ))
     app.add_handler(CallbackQueryHandler(checklist_toggle, pattern="^toggle:"))
     app.add_handler(CallbackQueryHandler(checklist_finish_button, pattern="^finish$"))
+    app.add_handler(CallbackQueryHandler(per_message_answer, pattern="^pm_(done|notdone):"))
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND, per_message_comment_received
+    ))
 
     # Har kuni soat 08:00da, kechagi kun uchun avtomatik PDF hisobot
     if app.job_queue:
