@@ -1117,13 +1117,37 @@ async def check_boss_task_reminders(context: ContextTypes.DEFAULT_TYPE):
             db.update_last_reminder(t["id"], today_str, current_time_str)
 
             if t["task_type"] == "prayer":
-                hadith_text, hadith_source = random.choice(db.PRAYER_HADITHS)
-                text = (
-                    f"🕌 {t['text']} namozi vaqti keldi, hali o'qimadingiz!\n\n"
-                    f"{hadith_text}\n— {hadith_source}\n\n"
-                    f"{db.PRAYER_CLOSING_NOTE}\n\n"
-                    f"Namozingizni o'qing! 🤲"
-                )
+                # Keyingi namoz vaqti kirib ketganmi? Agar ha — bu QAZO holati
+                is_qazo = False
+                pt = db.get_prayer_times(user["id"])
+                if pt:
+                    idx = db.PRAYER_ORDER.index(t["prayer_name"])
+                    if idx + 1 < len(db.PRAYER_ORDER):
+                        next_prayer_name = db.PRAYER_ORDER[idx + 1]
+                        next_time_str = pt.get(next_prayer_name)
+                        if next_time_str:
+                            try:
+                                next_time = datetime.strptime(
+                                    next_time_str, "%H:%M"
+                                ).time()
+                                if now.time() >= next_time:
+                                    is_qazo = True
+                            except ValueError:
+                                pass
+
+                if is_qazo:
+                    text = (
+                        f"⚠️ {t['text']} vaqtida o'qimadingiz, QAZO bo'ldi!\n\n"
+                        f"Qazosini iloji boricha tezroq o'qing. 🤲"
+                    )
+                else:
+                    hadith_text, hadith_source = random.choice(db.PRAYER_HADITHS)
+                    text = (
+                        f"🕌 {t['text']} namozi vaqti keldi, hali o'qimadingiz!\n\n"
+                        f"{hadith_text}\n— {hadith_source}\n\n"
+                        f"{db.PRAYER_CLOSING_NOTE}\n\n"
+                        f"Namozingizni o'qing! 🤲"
+                    )
             else:
                 text = (
                     f"⚠️ DIQQAT! \"{t['text']}\" vazifasi {task_time_str}da "
