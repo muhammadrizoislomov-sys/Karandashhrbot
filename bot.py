@@ -9,18 +9,21 @@ import os
 import logging
 import random
 from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, ConversationHandler, filters,
+    MessageHandler, ContextTypes, ConversationHandler, filters, Defaults,
 )
 
 import database as db
 import pdf_report
 
 load_dotenv()
+
+TASHKENT_TZ = ZoneInfo("Asia/Tashkent")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_GROUP_ID = os.getenv("ADMIN_GROUP_ID")  # admin guruhining chat_id si
@@ -1063,11 +1066,11 @@ async def send_boss_daily_tasklist(context: ContextTypes.DEFAULT_TYPE):
 # ---------------- TEZKOR ESLATMALAR (vaqti o'tib, bajarilmagan) ----------------
 
 async def check_boss_task_reminders(context: ContextTypes.DEFAULT_TYPE):
-    """Har 2 daqiqada ishga tushadi (09:00-23:00 oralig'ida). Vazifa vaqti
-    o'tgan ZAHOTI birinchi eslatma yuboradi, keyin har soatda takrorlaydi."""
+    """Har 2 daqiqada ishga tushadi (kun bo'yi). Vazifa vaqti o'tgan ZAHOTI
+    birinchi eslatma yuboradi, keyin har soatda takrorlaydi. Namoz
+    vazifalari kun bo'yi (24 soat) ishlaydi; oddiy vazifalar faqat
+    09:00-23:00 oralig'ida eslatiladi (kechasi xalaqit bermaslik uchun)."""
     now = datetime.now()
-    if now.hour < 9 or now.hour >= 23:
-        return
 
     today = date.today()
     today_str = today.isoformat()
@@ -1076,8 +1079,14 @@ async def check_boss_task_reminders(context: ContextTypes.DEFAULT_TYPE):
     for user in bosses:
         tasks = db.get_tasks_for_today(user["id"], today)
         for t in tasks:
+            is_prayer = (t["task_type"] == "prayer")
+
+            # Oddiy vazifalar uchun faqat 09:00-23:00 oralig'ida eslatma
+            if not is_prayer and (now.hour < 9 or now.hour >= 23):
+                continue
+
             task_time_str = t["time_str"]
-            if t["task_type"] == "prayer":
+            if is_prayer:
                 pt = db.get_prayer_times(user["id"])
                 task_time_str = pt.get(t["prayer_name"]) if pt else None
             if not task_time_str:
@@ -1184,7 +1193,12 @@ async def setup_bot_commands(app: Application):
 
 def main():
     db.init_db()
-    app = Application.builder().token(BOT_TOKEN).post_init(setup_bot_commands).build()
+    defaults = Defaults(tzinfo=TASHKENT_TZ)
+    app = (Application.builder()
+           .token(BOT_TOKEN)
+           .defaults(defaults)
+           .post_init(setup_bot_commands)
+           .build())
 
     reg_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
@@ -1308,12 +1322,13 @@ def main():
             send_boss_daily_tasklist,
             time=datetime.strptime("08:00", "%H:%M").time(),
         )
-        # Har 2 daqiqada tekshiradi (09:00dan boshlab), vazifa vaqti o'tgan
-        # zahoti birinchi eslatma yuboradi, keyin har soatda takrorlaydi
+        # Har 2 daqiqada tekshiradi (kun bo'yi — namoz vaqtlari erta/kech
+        # bo'lishi mumkin), vazifa vaqti o'tgan zahoti birinchi eslatma
+        # yuboradi, keyin har soatda takrorlaydi
         app.job_queue.run_repeating(
             check_boss_task_reminders,
             interval=120,  # 2 daqiqa
-            first=datetime.strptime("09:00", "%H:%M").time(),
+            first=10,  # bot ishga tushgandan 10 soniya keyin boshlanadi
         )
         # 23:00da, kunlik shaxsiy hisobot
         app.job_queue.run_daily(
