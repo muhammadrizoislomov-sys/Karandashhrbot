@@ -747,7 +747,7 @@ def register_handlers(app):
         fallbacks=[],
     )
 
-    app.add_handler(tijorat_conv)
-    app.add_handler(firma_qosh_conv)
+    app.add_handler(tijorat_conv, group=-1)
+    app.add_handler(firma_qosh_conv, group=-1)
     app.add_handler(CommandHandler("firmalar", cmd_firmalar))
     app.add_handler(CallbackQueryHandler(delete_firma_btn, pattern="^del_firma:"))

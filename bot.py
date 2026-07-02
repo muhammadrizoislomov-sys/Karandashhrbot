@@ -1308,6 +1308,10 @@ def main():
             & filters.REPLY,
             admin_reply_received,
         ))
+
+    # Tijorat taklifi moduli — global MessageHandler'dan OLDIN qo'shiladi
+    tijorat_module.register_handlers(app)
+
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND, per_message_comment_received
     ))
@@ -1369,9 +1373,6 @@ def main():
             time=datetime.strptime("07:30", "%H:%M").time(),
             days=(5,),  # PTB v20+: 0=yakshanba...6=shanba, demak juma=5
         )
-
-    # Tijorat taklifi moduli
-    tijorat_module.register_handlers(app)
 
     logger.info("Bot ishga tushdi...")
     app.run_polling()
