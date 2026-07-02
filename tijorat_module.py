@@ -40,9 +40,12 @@ else:
     F, FB, FI = "Helvetica", "Helvetica-Bold", "Helvetica-Oblique"
 
 # ── Conversation holatlari ──
-(TJ_FIRMA, TJ_EXCEL, TJ_SHABLON, TJ_TIL, TJ_FOIZ,
+(TJ_FIRMA, TJ_EXCEL, TJ_RAQAM, TJ_SANA, TJ_TIL, TJ_FOIZ, TJ_FOIZ_FIRMA,
  FIRMA_NOMI, FIRMA_MANZIL, FIRMA_STIR, FIRMA_HISOB,
- FIRMA_BANK, FIRMA_MFO, FIRMA_TEL, FIRMA_DIR) = range(50, 63)
+ FIRMA_BANK, FIRMA_MFO, FIRMA_TEL, FIRMA_DIR) = range(50, 65)
+
+# Shablon ixtiyoriy emas — bitta belgilangan
+DEFAULT_SHABLON = 4  # Yashil ADM uslubi
 
 
 def fmt(n):
@@ -90,34 +93,45 @@ def parse_excel(file_bytes: bytes) -> list:
     df = df.iloc[header_row + 1:].reset_index(drop=True)
 
     # Ustun nomlarini lotin/kirill dan standartlashtirish
+    # MUHIM: "summa/jami/итог" — bu JAMI (narx*miqdor), narxi emas!
     col_map = {}
     for col in df.columns:
         s = str(col).lower().strip()
-        if any(k in s for k in ["nomi", "naim", "tovar", "mahsulot", "product", "наим"]):
+        if any(k in s for k in ["nomi", "naim", "tovar", "mahsulot", "product", "наим", "наименов"]):
             col_map["nomi"] = col
-        elif any(k in s for k in ["olchov", "birlik", "ed.", "ед", "unit", "мер"]):
+        elif any(k in s for k in ["olchov", "birlik", "ed.изм", "ед.изм", "ед.", "unit", "мер"]):
             col_map["olchov"] = col
-        elif any(k in s for k in ["miqdor", "kol", "кол", "qty", "количест"]):
+        elif any(k in s for k in ["miqdor", "kol-vo", "кол-во", "количест", "qty", "count"]):
             col_map["miqdor"] = col
-        elif any(k in s for k in ["narx", "цен", "price", "сумм", "summa"]):
-            if "narxi" not in col_map and "jami" not in col_map:
-                col_map["narxi"] = col
-        elif any(k in s for k in ["jami", "итог", "total", "итог"]):
+        elif any(k in s for k in ["jami", "итог", "total", "сумма", "summa", "итого"]):
+            # Bu JAMI ustun — faqat narxi topilmagan bo'lsa, narxi sifatida ishlatmaymiz
             col_map["jami"] = col
+        elif any(k in s for k in ["narx", "цена", "price", "цен"]) and "jami" not in s and "итог" not in s:
+            col_map["narxi"] = col
 
     rows = []
     for _, row in df.iterrows():
         nomi = str(row.get(col_map.get("nomi",""), "")).strip()
-        if not nomi or nomi.lower() in ("nan", "", "none", "итого", "jami", "total"):
+        if not nomi or nomi.lower() in ("nan", "", "none", "итого", "jami", "total", "итог"):
             continue
         try:
             miqdor = float(str(row.get(col_map.get("miqdor",""), 1)).replace(" ","").replace(",","."))
+            if miqdor <= 0:
+                miqdor = 1
         except Exception:
             miqdor = 1
         try:
             narxi = float(str(row.get(col_map.get("narxi",""), 0)).replace(" ","").replace(",","."))
         except Exception:
             narxi = 0
+        # Agar narxi topilmasa, jami / miqdor orqali hisoblash
+        if narxi <= 0 and "jami" in col_map:
+            try:
+                jami = float(str(row.get(col_map["jami"], 0)).replace(" ","").replace(",","."))
+                if jami > 0 and miqdor > 0:
+                    narxi = jami / miqdor
+            except Exception:
+                pass
         olchov = str(row.get(col_map.get("olchov",""), "dona")).strip()
         if olchov.lower() in ("nan", "none", ""):
             olchov = "dona"
@@ -515,83 +529,66 @@ async def tijorat_excel_received(update: Update, context: ContextTypes.DEFAULT_T
         return TJ_EXCEL
 
     if not rows:
-        await update.message.reply_text("Excel'da tovar topilmadi. Ustunlar: nomi, olchov, miqdor, narxi.")
+        await update.message.reply_text(
+            "Excel'da tovar topilmadi.\n"
+            "Ustunlar bo'lishi kerak: Nomi, O'lchov, Miqdor, Narxi (yoki Jami)."
+        )
         return TJ_EXCEL
 
     context.user_data["tj_rows"] = rows
-    context.user_data["tj_raqam"] = str(random.randint(10, 99))
-    context.user_data["tj_sana"] = date.today().strftime("%d.%m.%Y")
-
-    # Jadval preview
-    total = sum(r["miqdor"]*r["narxi"] for r in rows)
+    total = sum(r["miqdor"] * r["narxi"] for r in rows)
     preview = f"✅ {len(rows)} ta tovar yuklandi. Jami: {fmt(total)} so'm\n\n"
-    preview += "\n".join(f"{i+1}. {r['nomi'][:35]} — {fmt(r['narxi'])} x {fmt(r['miqdor'])}"
-                          for i, r in enumerate(rows[:5]))
+    preview += "\n".join(
+        f"{i+1}. {r['nomi'][:35]} — {fmt(r['narxi'])} x {fmt(r['miqdor'])}"
+        for i, r in enumerate(rows[:5])
+    )
     if len(rows) > 5:
         preview += f"\n... va yana {len(rows)-5} ta"
 
-    kb = [[InlineKeyboardButton(v, callback_data=f"tj_sh:{k}")]
-          for k, v in SHABLON_LABELS.items()]
-    await update.message.reply_text(
-        preview + "\n\nQaysi shablon tanlaysiz?",
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
-    return TJ_SHABLON
+    await update.message.reply_text(preview + "\n\nTaklif raqamini kiriting (masalan: 41):")
+    return TJ_RAQAM
 
 
-async def tijorat_shablon_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    shablon_no = int(query.data.split(":")[1])
-    context.user_data["tj_shablon"] = shablon_no
-    await query.edit_message_text(
-        f"Shablon: {SHABLON_LABELS[shablon_no]}\n\nTil tanlang:",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("O'zbek (UZ)", callback_data="tj_til:uz"),
-            InlineKeyboardButton("Rus (RU)", callback_data="tj_til:ru"),
-            InlineKeyboardButton("Ikkisi ham (UZ+RU)", callback_data="tj_til:both"),
-        ]])
-    )
-    return TJ_TIL
+async def tijorat_raqam_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["tj_raqam"] = update.message.text.strip()
+    await update.message.reply_text("Taklif sanasini kiriting (masalan: 02.07.2026):")
+    return TJ_SANA
 
 
-async def tijorat_til_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    til = query.data.split(":")[1]
-    context.user_data["tj_til"] = til
-    await query.edit_message_text("PDF tayyorlanmoqda... ⏳")
-    await _send_pdfs(query.message, context, foiz=None)
+async def tijorat_sana_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["tj_sana"] = update.message.text.strip()
+    context.user_data["tj_shablon"] = DEFAULT_SHABLON
+    context.user_data["tj_til"] = "both"
+    await update.message.reply_text("PDF tayyorlanmoqda... ⏳")
+    await _send_pdfs(update.message, context, foiz=None)
     return TJ_FOIZ
 
 
-async def _send_pdfs(message, context, foiz=None):
-    firma   = context.user_data["tj_firma"]
+async def _send_pdfs(message, context, foiz=None, firma_override=None):
+    firma   = firma_override or context.user_data["tj_firma"]
     rows    = context.user_data["tj_rows"]
     raqam   = context.user_data["tj_raqam"]
     sana    = context.user_data["tj_sana"]
-    shablon = context.user_data["tj_shablon"]
-    til     = context.user_data["tj_til"]
+    shablon = context.user_data.get("tj_shablon", DEFAULT_SHABLON)
+    til     = context.user_data.get("tj_til", "both")
 
-    gen = GENERATORS.get(shablon, gen_1)
+    gen = GENERATORS.get(shablon, gen_4)
     langs = ["uz", "ru"] if til == "both" else [til]
-    fn = f"_{foiz}pct" if foiz else ""
 
     for lang in langs:
-        out = tempfile.mktemp(suffix=f".pdf")
+        out = tempfile.mktemp(suffix=".pdf")
+        # foiz — faqat hisoblash uchun, PDF'da ko'rsatilmaydi
         gen(firma, rows, raqam, sana, lang, foiz, out)
-        fname = f"tijorat_{firma['nomi'][:20]}_{lang}{fn}.pdf"
-        caption = f"{'Tijorat taklifi' if lang=='uz' else 'Tijorat taklifi (RU)'}"
-        if foiz:
-            caption += f" +{foiz}%"
+        fname = f"tijorat_{firma['nomi'][:20]}_{lang}.pdf"
+        caption = f"Tijorat taklifi — {firma['nomi'][:30]}"
         with open(out, "rb") as f:
             await message.reply_document(document=f, filename=fname, caption=caption)
         os.unlink(out)
 
-    # Foiz variantlari tugmalari
-    if not foiz:
+    # Foiz variantlari
+    if foiz is None:
         await message.reply_text(
-            "Boshqa firmadan ham qilasizmi? Narxni qancha oshirsin?",
+            "Boshqa firmadan ham taklif tayyorlash kerakmi?\nNarxni qancha oshirsin?",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("+3%",  callback_data="tj_foiz:3"),
                 InlineKeyboardButton("+5%",  callback_data="tj_foiz:5"),
@@ -608,13 +605,32 @@ async def tijorat_foiz_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE
     val = query.data.split(":")[1]
     if val == "done":
         await query.edit_message_text("Tijorat taklifi yakunlandi. ✅")
-        context.user_data.pop("tj_firma", None)
-        context.user_data.pop("tj_rows", None)
+        for k in ["tj_firma","tj_rows","tj_raqam","tj_sana","tj_shablon","tj_til"]:
+            context.user_data.pop(k, None)
         return ConversationHandler.END
 
-    foiz = int(val)
-    await query.edit_message_text(f"+{foiz}% bilan tayyorlanmoqda... ⏳")
-    await _send_pdfs(query.message, context, foiz=foiz)
+    context.user_data["tj_foiz_val"] = int(val)
+
+    # Qaysi firmadan so'raymiz
+    firmalar = db.get_all_firmalar()
+    kb = [[InlineKeyboardButton(f["nomi"], callback_data=f"tj_ff:{f['id']}")]
+          for f in firmalar]
+    await query.edit_message_text(
+        f"+{val}% oshirilgan narx bilan QAYSI FIRMA nomidan taklif tayyorlansin?",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
+    return TJ_FOIZ_FIRMA
+
+
+async def tijorat_foiz_firma_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    firma_id = int(query.data.split(":")[1])
+    firma = db.get_firma(firma_id)
+    foiz = context.user_data.get("tj_foiz_val", 5)
+
+    await query.edit_message_text(f"{firma['nomi']} nomidan +{foiz}% bilan tayyorlanmoqda... ⏳")
+    await _send_pdfs(query.message, context, foiz=foiz, firma_override=firma)
     return TJ_FOIZ
 
 
@@ -713,12 +729,13 @@ def register_handlers(app):
     tijorat_conv = ConversationHandler(
         entry_points=[CommandHandler("tijorat", cmd_tijorat)],
         states={
-            TJ_FIRMA:   [CallbackQueryHandler(tijorat_firma_chosen,  pattern="^tj_firma:")],
-            TJ_EXCEL:   [MessageHandler(filters.Document.ALL, tijorat_excel_received)],
-            TJ_SHABLON: [CallbackQueryHandler(tijorat_shablon_chosen, pattern="^tj_sh:")],
-            TJ_TIL:     [CallbackQueryHandler(tijorat_til_chosen,     pattern="^tj_til:")],
-            TJ_FOIZ:    [CallbackQueryHandler(tijorat_foiz_chosen,    pattern="^tj_foiz:")],
-            # Firma qo'shish (inline dan)
+            TJ_FIRMA:      [CallbackQueryHandler(tijorat_firma_chosen, pattern="^tj_firma:")],
+            TJ_EXCEL:      [MessageHandler(filters.Document.ALL, tijorat_excel_received)],
+            TJ_RAQAM:      [MessageHandler(filters.TEXT & ~filters.COMMAND, tijorat_raqam_received)],
+            TJ_SANA:       [MessageHandler(filters.TEXT & ~filters.COMMAND, tijorat_sana_received)],
+            TJ_FOIZ:       [CallbackQueryHandler(tijorat_foiz_chosen,      pattern="^tj_foiz:")],
+            TJ_FOIZ_FIRMA: [CallbackQueryHandler(tijorat_foiz_firma_chosen, pattern="^tj_ff:")],
+            # Firma qo'shish (inline dan /tijorat oqimida)
             FIRMA_NOMI:   [MessageHandler(filters.TEXT & ~filters.COMMAND, firma_nomi)],
             FIRMA_MANZIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, firma_manzil)],
             FIRMA_STIR:   [MessageHandler(filters.TEXT & ~filters.COMMAND, firma_stir)],
