@@ -125,6 +125,25 @@ def init_db():
         )
         """)
 
+        # ---------- TIJORAT TAKLIFI FIRMALAR ----------
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS tijorat_firmalar (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nomi TEXT NOT NULL,
+            manzil TEXT,
+            stir TEXT,
+            hisob TEXT,
+            bank TEXT,
+            mfo TEXT,
+            telefon TEXT,
+            direktor TEXT,
+            direktor_familiya TEXT,
+            okonx TEXT DEFAULT '',
+            active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
 
 # ---------- USERS ----------
 
@@ -760,3 +779,44 @@ def ensure_prayer_tasks(user_id):
     for p in PRAYER_ORDER:
         if p not in existing_prayers:
             add_boss_task(user_id, PRAYER_LABELS[p], "prayer", prayer_name=p)
+
+
+# =====================================================================
+# TIJORAT TAKLIFI — FIRMALAR
+# =====================================================================
+
+def add_firma(nomi, manzil="", stir="", hisob="", bank="", mfo="",
+              telefon="", direktor="", direktor_familiya="", okonx=""):
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO tijorat_firmalar
+               (nomi, manzil, stir, hisob, bank, mfo, telefon,
+                direktor, direktor_familiya, okonx)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (nomi, manzil, stir, hisob, bank, mfo, telefon,
+             direktor, direktor_familiya, okonx),
+        )
+        return cur.lastrowid
+
+
+def get_all_firmalar():
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM tijorat_firmalar WHERE active=1 ORDER BY nomi"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_firma(firma_id):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM tijorat_firmalar WHERE id=?", (firma_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def delete_firma(firma_id):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE tijorat_firmalar SET active=0 WHERE id=?", (firma_id,)
+        )

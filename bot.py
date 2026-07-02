@@ -20,6 +20,7 @@ from telegram.ext import (
 
 import database as db
 import pdf_report
+import tijorat_module
 
 load_dotenv()
 
@@ -1212,6 +1213,9 @@ async def setup_bot_commands(app: Application):
         BotCommand("vazifalarim", "Mening vazifalarim ro'yxati (boshqaruvchi)"),
         BotCommand("vazifa_ochir", "Vazifani o'chirish (boshqaruvchi)"),
         BotCommand("namoz_vaqtlari", "Namoz vaqtlarini yangilash (boshqaruvchi)"),
+        BotCommand("tijorat", "Tijorat taklifi tayyorlash (broker)"),
+        BotCommand("firma_qosh", "Yangi firma qo'shish (broker)"),
+        BotCommand("firmalar", "Firmalar ro'yxati (broker)"),
     ])
 
 
@@ -1365,6 +1369,9 @@ def main():
             time=datetime.strptime("07:30", "%H:%M").time(),
             days=(5,),  # PTB v20+: 0=yakshanba...6=shanba, demak juma=5
         )
+
+    # Tijorat taklifi moduli
+    tijorat_module.register_handlers(app)
 
     logger.info("Bot ishga tushdi...")
     app.run_polling()
